@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.net.Uri
+import android.view.ViewGroup
+import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -42,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -77,7 +80,7 @@ fun MultiStreamApp(vm: StreamsViewModel) {
     BackHandler(enabled = focused != null) { vm.unfocus() }
 
     if (focused != null) {
-        FullscreenPlayer(vm, focused)
+        key(focused.id) { FullscreenPlayer(vm, focused) }
     } else {
         Scaffold(
             containerColor = Color.Black,
@@ -123,8 +126,8 @@ private fun EmptyState(onAdd: () -> Unit, onDemo: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            "Додайте посилання на стріми (HLS .m3u8, DASH .mpd, RTSP, MP4).\n" +
-                "Тап по плитці — розгорнути на весь екран, довгий тап — меню.",
+            "Додайте посилання на стріми: HLS, DASH, MPEG-TS, RTSP, RTMP, UDP, MP4, YouTube, Twitch.\n" +
+                "Тап по плитці — на весь екран, довгий тап — меню.",
             color = Color.White,
             textAlign = TextAlign.Center,
         )
@@ -164,7 +167,7 @@ private fun StreamGrid(vm: StreamsViewModel) {
                         val item = items.getOrNull(r * cols + c)
                         Box(Modifier.weight(1f).fillMaxHeight().padding(1.dp)) {
                             if (item != null) {
-                                androidx.compose.runtime.key(item.id) { StreamTile(vm, item) }
+                                key(item.id) { StreamTile(vm, item) }
                             }
                         }
                     }
@@ -177,15 +180,15 @@ private fun StreamGrid(vm: StreamsViewModel) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun StreamTile(vm: StreamsViewModel, item: StreamItem) {
-    val player = vm.playerFor(item)
+    val player = if (item.isWeb) null else vm.playerFor(item)
     var menu by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize().clip(RoundedCornerShape(6.dp)).background(Color.Black)) {
-        PlayerSurface(player, controller = false)
+        if (player != null) PlayerSurface(player, controller = false) else WebSurface(vm.webViewFor(item))
 
         // Шар для жестів: тап — на весь екран, довгий тап — меню.
         Box(
-            Modifier.matchParentSizeCompat().combinedClickable(
+            Modifier.matchParentSize().combinedClickable(
                 onClick = { vm.focus(item.id) },
                 onLongClick = { menu = true },
             ),
@@ -204,7 +207,7 @@ private fun StreamTile(vm: StreamsViewModel, item: StreamItem) {
                 .padding(horizontal = 6.dp, vertical = 2.dp),
         )
 
-        PlaybackOverlay(player, onRetry = { vm.restart(item.id) })
+        if (player != null) PlaybackOverlay(player, onRetry = { vm.restart(item.id) })
 
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
             DropdownMenuItem(
@@ -216,6 +219,14 @@ private fun StreamTile(vm: StreamsViewModel, item: StreamItem) {
                 onClick = { menu = false; vm.restart(item.id) },
             )
             DropdownMenuItem(
+                text = { Text("Перемістити раніше") },
+                onClick = { menu = false; vm.move(item.id, -1) },
+            )
+            DropdownMenuItem(
+                text = { Text("Перемістити пізніше") },
+                onClick = { menu = false; vm.move(item.id, +1) },
+            )
+            DropdownMenuItem(
                 text = { Text("Видалити") },
                 onClick = { menu = false; vm.remove(item.id) },
             )
@@ -223,28 +234,44 @@ private fun StreamTile(vm: StreamsViewModel, item: StreamItem) {
     }
 }
 
-private fun Modifier.matchParentSizeCompat(): Modifier = this.fillMaxSize()
-
 @Composable
 private fun FullscreenPlayer(vm: StreamsViewModel, item: StreamItem) {
-    val player = vm.playerFor(item)
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        PlayerSurface(player, controller = true)
-        PlaybackOverlay(player, onRetry = { vm.restart(item.id) })
+        if (item.isWeb) {
+            WebSurface(vm.webViewFor(item))
+        } else {
+            val player = vm.playerFor(item)
+            PlayerSurface(player, controller = true)
+            PlaybackOverlay(player, onRetry = { vm.restart(item.id) })
+        }
+
         Row(
-            Modifier.fillMaxWidth().safeDrawingPadding().padding(4.dp),
+            Modifier
+                .fillMaxWidth()
+                .background(Color(0x66000000))
+                .safeDrawingPadding()
+                .padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (vm.streams.size > 1) {
+                TextButton(onClick = { vm.cycleFocus(-1) }) {
+                    Text("‹", color = Color.White, fontSize = 28.sp)
+                }
+            }
             Text(
                 item.name,
                 color = Color.White,
                 fontSize = 14.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 8.dp),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.weight(1f),
             )
+            if (vm.streams.size > 1) {
+                TextButton(onClick = { vm.cycleFocus(+1) }) {
+                    Text("›", color = Color.White, fontSize = 28.sp)
+                }
+            }
             IconButton(onClick = vm::unfocus) {
                 Icon(Icons.Default.Close, contentDescription = "Закрити", tint = Color.White)
             }
@@ -270,25 +297,42 @@ private fun PlayerSurface(player: ExoPlayer, controller: Boolean) {
     )
 }
 
-private data class PlayUi(val state: Int, val error: Boolean)
+/** WebView живе у ViewModel, тому при розгортанні перекидається в нове місце без перезавантаження. */
+@Composable
+private fun WebSurface(webView: WebView) {
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = {
+            (webView.parent as? ViewGroup)?.removeView(webView)
+            webView
+        },
+    )
+}
+
+private data class PlayUi(val state: Int, val error: String?)
+
+private fun PlaybackException.brief(): String {
+    val reason = cause?.message?.take(90)
+    return if (reason.isNullOrBlank()) errorCodeName else "$errorCodeName: $reason"
+}
 
 @Composable
 private fun rememberPlayUi(player: ExoPlayer): State<PlayUi> {
     val state = remember(player) {
-        mutableStateOf(PlayUi(player.playbackState, player.playerError != null))
+        mutableStateOf(PlayUi(player.playbackState, player.playerError?.brief()))
     }
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
-                state.value = PlayUi(playbackState, player.playerError != null)
+                state.value = PlayUi(playbackState, player.playerError?.brief())
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                state.value = PlayUi(player.playbackState, true)
+                state.value = PlayUi(player.playbackState, error.brief())
             }
         }
         player.addListener(listener)
-        state.value = PlayUi(player.playbackState, player.playerError != null)
+        state.value = PlayUi(player.playbackState, player.playerError?.brief())
         onDispose { player.removeListener(listener) }
     }
     return state
@@ -297,12 +341,21 @@ private fun rememberPlayUi(player: ExoPlayer): State<PlayUi> {
 @Composable
 private fun BoxScope.PlaybackOverlay(player: ExoPlayer, onRetry: () -> Unit) {
     val ui by rememberPlayUi(player)
-    if (ui.error) {
+    val error = ui.error
+    if (error != null) {
         Column(
-            Modifier.align(Alignment.Center),
+            Modifier.align(Alignment.Center).padding(8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text("Помилка відтворення", color = Color.White, fontSize = 12.sp)
+            Text(
+                error,
+                color = Color(0xFFFFB4AB),
+                fontSize = 10.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+            )
             TextButton(onClick = onRetry) { Text("Повторити") }
         }
     } else if (ui.state == Player.STATE_BUFFERING) {
@@ -334,10 +387,15 @@ private fun AddStreamDialog(onDismiss: () -> Unit, onAdd: (String, String) -> Un
                 OutlinedTextField(
                     value = url,
                     onValueChange = { url = it; error = false },
-                    label = { Text("URL (HLS, DASH, RTSP, MP4)") },
+                    label = { Text("URL стріму") },
                     singleLine = true,
                     isError = error,
-                    supportingText = { if (error) Text("Потрібне посилання http(s):// або rtsp://") },
+                    supportingText = {
+                        Text(
+                            if (error) "Потрібне посилання http(s)://, rtsp://, rtmp:// або udp://"
+                            else "HLS, DASH, MPEG-TS, RTSP, RTMP, UDP, MP4, YouTube, Twitch",
+                        )
+                    },
                 )
             }
         },
@@ -353,7 +411,7 @@ private fun AddStreamDialog(onDismiss: () -> Unit, onAdd: (String, String) -> Un
 private fun isValidUrl(s: String): Boolean {
     val uri = Uri.parse(s.trim())
     val scheme = uri.scheme?.lowercase() ?: return false
-    return scheme in setOf("http", "https", "rtsp") && !uri.host.isNullOrBlank()
+    return scheme in setOf("http", "https", "rtsp", "rtmp", "udp") && !uri.host.isNullOrBlank()
 }
 
 /** Ховає системні панелі у повноекранному режимі (свайп від краю показує їх тимчасово). */
