@@ -7,8 +7,10 @@ import android.graphics.Color
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.view.ViewGroup
+import android.webkit.HttpAuthHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -28,9 +30,24 @@ import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import org.json.JSONArray
 import org.json.JSONObject
 
-data class StreamItem(val id: Long, val name: String, val url: String) {
-    /** YouTube / Twitch відтворюються через WebView, решта — через ExoPlayer. */
-    val isWeb: Boolean get() = Embeds.isWeb(url)
+data class StreamItem(
+    val id: Long,
+    val name: String,
+    val url: String,
+    val mjpeg: Boolean = false,
+    val user: String = "",
+    val pass: String = "",
+) {
+    /** MJPEG, YouTube і Twitch відтворюються через WebView, решта — через ExoPlayer. */
+    val isWeb: Boolean get() = mjpeg || Embeds.isWeb(url)
+
+    /** Логін/пароль з окремих полів або з адреси виду http://user:pass@host/. */
+    fun credentials(): Pair<String, String> {
+        if (user.isNotEmpty()) return user to pass
+        val info = Uri.parse(url).userInfo ?: return "" to ""
+        val i = info.indexOf(':')
+        return if (i < 0) info to "" else info.substring(0, i) to info.substring(i + 1)
+    }
 }
 
 /**
@@ -71,6 +88,7 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
     private val players = HashMap<Long, ExoPlayer>()
     private val webViews = HashMap<Long, WebView>()
     private val attemptIdx = HashMap<Long, Int>()
+    private val authTries = HashMap<Long, Int>()
     private var foreground = true
     private var multicastLock: WifiManager.MulticastLock? = null
 
@@ -137,20 +155,55 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
             settings.mediaPlaybackRequiresUserGesture = false
             setBackgroundColor(Color.BLACK)
             webChromeClient = WebChromeClient()
-            loadEmbed(this, item.url)
+            if (item.mjpeg) {
+                // Basic/Digest-авторизація камери: відповідаємо логіном і паролем (до 3 спроб, щоб не зациклитись).
+                webViewClient = object : WebViewClient() {
+                    override fun onReceivedHttpAuthRequest(
+                        view: WebView?,
+                        handler: HttpAuthHandler,
+                        host: String?,
+                        realm: String?,
+                    ) {
+                        val (u, p) = item.credentials()
+                        val tries = authTries[item.id] ?: 0
+                        if (u.isNotEmpty() && tries < 3) {
+                            authTries[item.id] = tries + 1
+                            handler.proceed(u, p)
+                        } else {
+                            handler.cancel()
+                        }
+                    }
+                }
+            }
+            loadEmbed(this, item)
         }
     }
 
-    private fun loadEmbed(wv: WebView, url: String) {
-        wv.loadDataWithBaseURL(Embeds.BASE_URL, Embeds.html(url), "text/html", "utf-8", null)
+    private fun loadEmbed(wv: WebView, item: StreamItem) {
+        authTries[item.id] = 0
+        if (item.mjpeg) {
+            wv.loadDataWithBaseURL(
+                Embeds.mjpegOrigin(item.url), Embeds.mjpegHtml(item.url), "text/html", "utf-8", null,
+            )
+        } else {
+            wv.loadDataWithBaseURL(Embeds.BASE_URL, Embeds.html(item.url), "text/html", "utf-8", null)
+        }
     }
 
     // ---------- Керування списком ----------
 
-    fun add(name: String, url: String): Boolean {
+    fun add(
+        name: String,
+        url: String,
+        mjpeg: Boolean = false,
+        user: String = "",
+        pass: String = "",
+    ): Boolean {
         if (streams.size >= MAX_STREAMS) return false
         val id = System.nanoTime()
-        streams += StreamItem(id, name.ifBlank { "Стрім ${streams.size + 1}" }, url.trim())
+        streams += StreamItem(
+            id, name.ifBlank { "Стрім ${streams.size + 1}" }, url.trim(), mjpeg, user, pass,
+        )
         save()
         ensureMulticastLock()
         return true
@@ -164,6 +217,7 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
         players.remove(id)?.release()
         webViews.remove(id)?.let { destroyWebView(it) }
         attemptIdx.remove(id)
+        authTries.remove(id)
         streams.removeAll { it.id == id }
         if (focusedId == id) focusedId = null
         applyAll()
@@ -183,7 +237,7 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
     fun restart(id: Long) {
         val item = streams.firstOrNull { it.id == id } ?: return
         if (item.isWeb) {
-            webViews[id]?.let { loadEmbed(it, item.url) }
+            webViews[id]?.let { loadEmbed(it, item) }
             return
         }
         players[id]?.let {
@@ -236,7 +290,11 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
     private fun save() {
         val arr = JSONArray()
         streams.forEach {
-            arr.put(JSONObject().put("id", it.id).put("name", it.name).put("url", it.url))
+            arr.put(
+                JSONObject()
+                    .put("id", it.id).put("name", it.name).put("url", it.url)
+                    .put("mjpeg", it.mjpeg).put("user", it.user).put("pass", it.pass),
+            )
         }
         prefs.edit().putString(KEY, arr.toString()).apply()
     }
@@ -247,7 +305,10 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
             val arr = JSONArray(raw)
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
-                streams += StreamItem(o.getLong("id"), o.getString("name"), o.getString("url"))
+                streams += StreamItem(
+                    o.getLong("id"), o.getString("name"), o.getString("url"),
+                    o.optBoolean("mjpeg"), o.optString("user"), o.optString("pass"),
+                )
             }
         } catch (_: Exception) {
             streams.clear()

@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -54,6 +55,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -103,8 +105,8 @@ fun MultiStreamApp(vm: StreamsViewModel) {
     if (showAdd) {
         AddStreamDialog(
             onDismiss = { showAdd = false },
-            onAdd = { name, url ->
-                if (vm.add(name, url)) {
+            onAdd = { name, url, mjpeg, user, pass ->
+                if (vm.add(name, url, mjpeg, user, pass)) {
                     showAdd = false
                 } else {
                     Toast.makeText(
@@ -368,9 +370,15 @@ private fun BoxScope.PlaybackOverlay(player: ExoPlayer, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun AddStreamDialog(onDismiss: () -> Unit, onAdd: (String, String) -> Unit) {
+private fun AddStreamDialog(
+    onDismiss: () -> Unit,
+    onAdd: (name: String, url: String, mjpeg: Boolean, user: String, pass: String) -> Unit,
+) {
     var name by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
+    var mjpeg by remember { mutableStateOf(false) }
+    var user by remember { mutableStateOf("") }
+    var pass by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
 
     AlertDialog(
@@ -397,21 +405,45 @@ private fun AddStreamDialog(onDismiss: () -> Unit, onAdd: (String, String) -> Un
                         )
                     },
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = mjpeg, onCheckedChange = { mjpeg = it; error = false })
+                    Text("MJPEG (IP-камера)")
+                }
+                if (mjpeg) {
+                    OutlinedTextField(
+                        value = user,
+                        onValueChange = { user = it },
+                        label = { Text("Логін (необов'язково)") },
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = pass,
+                        onValueChange = { pass = it },
+                        label = { Text("Пароль (необов'язково)") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = {
-                if (isValidUrl(url)) onAdd(name.trim(), url.trim()) else error = true
+                if (isValidUrl(url, mjpeg)) {
+                    onAdd(name.trim(), url.trim(), mjpeg, if (mjpeg) user.trim() else "", if (mjpeg) pass else "")
+                } else {
+                    error = true
+                }
             }) { Text("Додати") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Скасувати") } },
     )
 }
 
-private fun isValidUrl(s: String): Boolean {
+private fun isValidUrl(s: String, mjpeg: Boolean): Boolean {
     val uri = Uri.parse(s.trim())
     val scheme = uri.scheme?.lowercase() ?: return false
-    return scheme in setOf("http", "https", "rtsp", "rtmp", "udp") && !uri.host.isNullOrBlank()
+    val allowed = if (mjpeg) setOf("http", "https") else setOf("http", "https", "rtsp", "rtmp", "udp")
+    return scheme in allowed && !uri.host.isNullOrBlank()
 }
 
 /** Ховає системні панелі у повноекранному режимі (свайп від краю показує їх тимчасово). */

@@ -1,6 +1,7 @@
 package com.example.multistream
 
 import android.net.Uri
+import android.text.TextUtils
 
 /** Перетворює посилання YouTube / Twitch на вбудований плеєр для WebView. */
 object Embeds {
@@ -22,6 +23,28 @@ object Embeds {
         return page(
             "<iframe src=\"$src\" style=\"position:absolute;top:0;left:0;width:100%;height:100%;border:0\" " +
                 "allow=\"autoplay; encrypted-media; picture-in-picture; fullscreen\" allowfullscreen></iframe>",
+        )
+    }
+
+    /** Адреса-«джерело» камери: сторінка з тим самим origin, щоб не було mixed content і кросдоменної авторизації. */
+    fun mjpegOrigin(url: String): String {
+        val u = Uri.parse(url)
+        val port = if (u.port != -1) ":${u.port}" else ""
+        return "${u.scheme}://${u.host}$port/"
+    }
+
+    /** MJPEG показується звичайним <img>; user:pass@ з адреси прибираємо (Chrome блокує такі підзапити). */
+    fun mjpegHtml(url: String): String {
+        val u = Uri.parse(url)
+        val port = if (u.port != -1) ":${u.port}" else ""
+        val clean = "${u.scheme}://${u.host}$port${u.encodedPath ?: ""}" +
+            (u.encodedQuery?.let { "?$it" } ?: "")
+        val src = TextUtils.htmlEncode(clean)
+        return page(
+            "<p id=\"m\" style=\"display:none;color:#fff;font:13px sans-serif;padding:12px\">" +
+                "Не вдалося завантажити MJPEG. Перевірте адресу, логін і пароль.</p>" +
+                "<img src=\"$src\" style=\"position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain\" " +
+                "onerror=\"this.style.display='none';document.getElementById('m').style.display='block'\">",
         )
     }
 
