@@ -9,6 +9,7 @@ import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -53,6 +54,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -182,11 +184,15 @@ private fun StreamGrid(vm: StreamsViewModel) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun StreamTile(vm: StreamsViewModel, item: StreamItem) {
-    val player = if (item.isWeb) null else vm.playerFor(item)
+    val player = if (item.isWeb || item.isMjpeg) null else vm.playerFor(item)
     var menu by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize().clip(RoundedCornerShape(6.dp)).background(Color.Black)) {
-        if (player != null) PlayerSurface(player, controller = false) else WebSurface(vm.webViewFor(item))
+        when {
+            player != null -> PlayerSurface(player, controller = false)
+            item.isMjpeg -> MjpegSurface(vm.mjpegFor(item))
+            else -> WebSurface(vm.webViewFor(item))
+        }
 
         // Шар для жестів: тап — на весь екран, довгий тап — меню.
         Box(
@@ -239,7 +245,9 @@ private fun StreamTile(vm: StreamsViewModel, item: StreamItem) {
 @Composable
 private fun FullscreenPlayer(vm: StreamsViewModel, item: StreamItem) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        if (item.isWeb) {
+        if (item.isMjpeg) {
+            MjpegSurface(vm.mjpegFor(item))
+        } else if (item.isWeb) {
             WebSurface(vm.webViewFor(item))
         } else {
             val player = vm.playerFor(item)
@@ -309,6 +317,36 @@ private fun WebSurface(webView: WebView) {
             webView
         },
     )
+}
+
+/** Кадри MJPEG + текст стану/помилки (наприклад «HTTP 401», «Таймаут: камера не відповідає»). */
+@Composable
+private fun BoxScope.MjpegSurface(source: MjpegSource) {
+    val frame = source.frame
+    val status = source.status
+    if (frame != null) {
+        Image(
+            bitmap = frame,
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+    if (status.isNotEmpty()) {
+        Text(
+            status,
+            color = Color.White,
+            fontSize = 11.sp,
+            maxLines = 4,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .align(if (frame == null) Alignment.Center else Alignment.BottomCenter)
+                .padding(8.dp)
+                .background(Color(0x99000000), RoundedCornerShape(4.dp))
+                .padding(horizontal = 6.dp, vertical = 3.dp),
+        )
+    }
 }
 
 private data class PlayUi(val state: Int, val error: String?)

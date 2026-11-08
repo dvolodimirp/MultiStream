@@ -9,10 +9,8 @@ import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
-import android.webkit.HttpAuthHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -43,8 +41,8 @@ data class StreamItem(
     /** MJPEG: за галочкою або за типовою адресою (?action=stream, .mjpg тощо). */
     val isMjpeg: Boolean get() = mjpeg || Embeds.looksMjpeg(url)
 
-    /** MJPEG, YouTube і Twitch відтворюються через WebView, решта — через ExoPlayer. */
-    val isWeb: Boolean get() = isMjpeg || Embeds.isWeb(url)
+    /** YouTube / Twitch відтворюються через WebView. */
+    val isWeb: Boolean get() = !isMjpeg && Embeds.isWeb(url)
 
     /** Логін/пароль з окремих полів або з адреси виду http://user:pass@host/. */
     fun credentials(): Pair<String, String> {
@@ -56,9 +54,9 @@ data class StreamItem(
 }
 
 /**
- * Тримає список стрімів, по одному ExoPlayer (або WebView) на кожен.
- * Плеєри живуть у ViewModel, тому розгортання на весь екран
- * використовує той самий плеєр без перезавантаження потоку.
+ * Тримає список стрімів і по одному джерелу на кожен: ExoPlayer, MjpegSource або WebView.
+ * Джерела живуть у ViewModel, тому розгортання на весь екран
+ * використовує те саме джерело без перезавантаження потоку.
  */
 @OptIn(UnstableApi::class)
 class StreamsViewModel(app: Application) : AndroidViewModel(app) {
@@ -92,8 +90,8 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val players = HashMap<Long, ExoPlayer>()
     private val webViews = HashMap<Long, WebView>()
+    private val mjpegs = HashMap<Long, MjpegSource>()
     private val attemptIdx = HashMap<Long, Int>()
-    private val authTries = HashMap<Long, Int>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var foreground = true
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -141,7 +139,7 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
                 val next = (attemptIdx[item.id] ?: 0) + 1
                 if (next >= ATTEMPTS.size) {
                     // Жоден формат не підійшов: найімовірніше це MJPEG (multipart/x-mixed-replace),
-                    // який ExoPlayer не вміє, — перемикаємо плитку на WebView.
+                    // який ExoPlayer не вміє, — перемикаємо плитку на власний MJPEG-клієнт.
                     mainHandler.post { convertToMjpeg(item.id) }
                     return
                 }
@@ -158,14 +156,24 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun convertToMjpeg(id: Long) {
         val i = streams.indexOfFirst { it.id == id }
-        if (i < 0 || streams[i].isWeb) return
+        if (i < 0 || streams[i].isMjpeg) return
         players.remove(id)?.release()
         attemptIdx.remove(id)
         streams[i] = streams[i].copy(mjpeg = true)
         save()
     }
 
-    // ---------- WebView (MJPEG, YouTube, Twitch) ----------
+    // ---------- MJPEG ----------
+
+    fun mjpegFor(item: StreamItem): MjpegSource = mjpegs.getOrPut(item.id) {
+        MjpegSource(item).also { applyMjpeg(item.id, it) }
+    }
+
+    private fun applyMjpeg(id: Long, s: MjpegSource) {
+        if (foreground && (focusedId == null || focusedId == id)) s.start() else s.stop()
+    }
+
+    // ---------- WebView (YouTube / Twitch) ----------
 
     @SuppressLint("SetJavaScriptEnabled")
     fun webViewFor(item: StreamItem): WebView = webViews.getOrPut(item.id) {
@@ -175,39 +183,12 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
             settings.mediaPlaybackRequiresUserGesture = false
             setBackgroundColor(Color.BLACK)
             webChromeClient = WebChromeClient()
-            if (item.isMjpeg) {
-                // Basic/Digest-авторизація камери: відповідаємо логіном і паролем (до 3 спроб, щоб не зациклитись).
-                webViewClient = object : WebViewClient() {
-                    override fun onReceivedHttpAuthRequest(
-                        view: WebView?,
-                        handler: HttpAuthHandler,
-                        host: String?,
-                        realm: String?,
-                    ) {
-                        val (u, p) = item.credentials()
-                        val tries = authTries[item.id] ?: 0
-                        if (u.isNotEmpty() && tries < 3) {
-                            authTries[item.id] = tries + 1
-                            handler.proceed(u, p)
-                        } else {
-                            handler.cancel()
-                        }
-                    }
-                }
-            }
             loadEmbed(this, item)
         }
     }
 
     private fun loadEmbed(wv: WebView, item: StreamItem) {
-        authTries[item.id] = 0
-        if (item.isMjpeg) {
-            wv.loadDataWithBaseURL(
-                Embeds.mjpegOrigin(item.url), Embeds.mjpegHtml(item.url), "text/html", "utf-8", null,
-            )
-        } else {
-            wv.loadDataWithBaseURL(Embeds.BASE_URL, Embeds.html(item.url), "text/html", "utf-8", null)
-        }
+        wv.loadDataWithBaseURL(Embeds.BASE_URL, Embeds.html(item.url), "text/html", "utf-8", null)
     }
 
     // ---------- Керування списком ----------
@@ -235,9 +216,9 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun remove(id: Long) {
         players.remove(id)?.release()
+        mjpegs.remove(id)?.stop()
         webViews.remove(id)?.let { destroyWebView(it) }
         attemptIdx.remove(id)
-        authTries.remove(id)
         streams.removeAll { it.id == id }
         if (focusedId == id) focusedId = null
         applyAll()
@@ -256,15 +237,18 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun restart(id: Long) {
         val item = streams.firstOrNull { it.id == id } ?: return
-        if (item.isWeb) {
-            webViews[id]?.let { loadEmbed(it, item) }
-            return
-        }
-        players[id]?.let {
-            attemptIdx[id] = 0
-            it.setMediaItem(mediaItem(item.url, ATTEMPTS[0]))
-            it.prepare()
-            applyState(id, it)
+        when {
+            item.isMjpeg -> mjpegs[id]?.let {
+                it.stop()
+                applyMjpeg(id, it)
+            }
+            item.isWeb -> webViews[id]?.let { loadEmbed(it, item) }
+            else -> players[id]?.let {
+                attemptIdx[id] = 0
+                it.setMediaItem(mediaItem(item.url, ATTEMPTS[0]))
+                it.prepare()
+                applyState(id, it)
+            }
         }
     }
 
@@ -303,7 +287,10 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
         p.volume = if (focusedId == id) 1f else 0f
     }
 
-    private fun applyAll() = players.forEach { (id, p) -> applyState(id, p) }
+    private fun applyAll() {
+        players.forEach { (id, p) -> applyState(id, p) }
+        mjpegs.forEach { (id, s) -> applyMjpeg(id, s) }
+    }
 
     // ---------- Збереження ----------
 
@@ -357,6 +344,8 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         players.values.forEach { it.release() }
         players.clear()
+        mjpegs.values.forEach { it.stop() }
+        mjpegs.clear()
         webViews.values.forEach { destroyWebView(it) }
         webViews.clear()
         multicastLock?.takeIf { it.isHeld }?.release()
