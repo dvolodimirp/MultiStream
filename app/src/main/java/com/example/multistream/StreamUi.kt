@@ -407,7 +407,7 @@ private fun AddStreamDialog(
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = mjpeg, onCheckedChange = { mjpeg = it; error = false })
-                    Text("MJPEG (IP-камера)")
+                    Text("MJPEG (IP-камера, mjpg-streamer)")
                 }
                 if (mjpeg) {
                     OutlinedTextField(

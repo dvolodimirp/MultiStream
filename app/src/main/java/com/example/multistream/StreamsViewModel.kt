@@ -6,6 +6,8 @@ import android.content.Context
 import android.graphics.Color
 import android.net.Uri
 import android.net.wifi.WifiManager
+import android.os.Handler
+import android.os.Looper
 import android.view.ViewGroup
 import android.webkit.HttpAuthHandler
 import android.webkit.WebChromeClient
@@ -38,8 +40,11 @@ data class StreamItem(
     val user: String = "",
     val pass: String = "",
 ) {
+    /** MJPEG: за галочкою або за типовою адресою (?action=stream, .mjpg тощо). */
+    val isMjpeg: Boolean get() = mjpeg || Embeds.looksMjpeg(url)
+
     /** MJPEG, YouTube і Twitch відтворюються через WebView, решта — через ExoPlayer. */
-    val isWeb: Boolean get() = mjpeg || Embeds.isWeb(url)
+    val isWeb: Boolean get() = isMjpeg || Embeds.isWeb(url)
 
     /** Логін/пароль з окремих полів або з адреси виду http://user:pass@host/. */
     fun credentials(): Pair<String, String> {
@@ -89,6 +94,7 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
     private val webViews = HashMap<Long, WebView>()
     private val attemptIdx = HashMap<Long, Int>()
     private val authTries = HashMap<Long, Int>()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var foreground = true
     private var multicastLock: WifiManager.MulticastLock? = null
 
@@ -133,7 +139,12 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
                 val scheme = Uri.parse(item.url).scheme?.lowercase()
                 if (scheme != "http" && scheme != "https") return
                 val next = (attemptIdx[item.id] ?: 0) + 1
-                if (next >= ATTEMPTS.size) return
+                if (next >= ATTEMPTS.size) {
+                    // Жоден формат не підійшов: найімовірніше це MJPEG (multipart/x-mixed-replace),
+                    // який ExoPlayer не вміє, — перемикаємо плитку на WebView.
+                    mainHandler.post { convertToMjpeg(item.id) }
+                    return
+                }
                 attemptIdx[item.id] = next
                 player.setMediaItem(mediaItem(item.url, ATTEMPTS[next]))
                 player.prepare()
@@ -145,7 +156,16 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
         player
     }
 
-    // ---------- WebView (YouTube / Twitch) ----------
+    private fun convertToMjpeg(id: Long) {
+        val i = streams.indexOfFirst { it.id == id }
+        if (i < 0 || streams[i].isWeb) return
+        players.remove(id)?.release()
+        attemptIdx.remove(id)
+        streams[i] = streams[i].copy(mjpeg = true)
+        save()
+    }
+
+    // ---------- WebView (MJPEG, YouTube, Twitch) ----------
 
     @SuppressLint("SetJavaScriptEnabled")
     fun webViewFor(item: StreamItem): WebView = webViews.getOrPut(item.id) {
@@ -155,7 +175,7 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
             settings.mediaPlaybackRequiresUserGesture = false
             setBackgroundColor(Color.BLACK)
             webChromeClient = WebChromeClient()
-            if (item.mjpeg) {
+            if (item.isMjpeg) {
                 // Basic/Digest-авторизація камери: відповідаємо логіном і паролем (до 3 спроб, щоб не зациклитись).
                 webViewClient = object : WebViewClient() {
                     override fun onReceivedHttpAuthRequest(
@@ -181,7 +201,7 @@ class StreamsViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun loadEmbed(wv: WebView, item: StreamItem) {
         authTries[item.id] = 0
-        if (item.mjpeg) {
+        if (item.isMjpeg) {
             wv.loadDataWithBaseURL(
                 Embeds.mjpegOrigin(item.url), Embeds.mjpegHtml(item.url), "text/html", "utf-8", null,
             )
