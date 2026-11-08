@@ -99,6 +99,7 @@ class MjpegSource(private val item: StreamItem) {
             if (code == 401) throw IOException("HTTP 401: невірний або потрібен логін/пароль (підтримується Basic)")
             if (code !in 200..299) throw IOException("HTTP $code")
             val type = (c.contentType ?: "").lowercase()
+            if (frame == null) status = "З'єднано (${c.contentType}), чекаю кадр…"
             val input = BufferedInputStream(c.inputStream, 64 * 1024)
             return when {
                 "multipart" in type -> {
@@ -138,7 +139,11 @@ class MjpegSource(private val item: StreamItem) {
     }
 
     private fun publish(bytes: ByteArray) {
-        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        if (bmp == null) {
+            status = "Не вдалось декодувати кадр (${bytes.size} байт)"
+            return
+        }
         frame = bmp.asImageBitmap()
         if (status.isNotEmpty()) status = ""
     }
@@ -182,7 +187,8 @@ class MjpegSource(private val item: StreamItem) {
     private fun cleanUrl(url: String): String {
         val u = Uri.parse(url)
         val port = if (u.port != -1) ":${u.port}" else ""
-        return "${u.scheme}://${u.host}$port${u.encodedPath ?: ""}" +
+        val path = u.encodedPath?.ifEmpty { "/" } ?: "/"
+        return "${u.scheme}://${u.host}$port$path" +
             (u.encodedQuery?.let { "?$it" } ?: "")
     }
 

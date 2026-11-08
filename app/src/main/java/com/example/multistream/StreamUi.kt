@@ -79,6 +79,10 @@ fun MultiStreamApp(vm: StreamsViewModel) {
     val context = LocalContext.current
     val focused = vm.streams.firstOrNull { it.id == vm.focusedId }
     var showAdd by remember { mutableStateOf(false) }
+    val version = remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
+            .getOrNull() ?: "?"
+    }
 
     ImmersiveMode(enabled = focused != null)
     BackHandler(enabled = focused != null) { vm.unfocus() }
@@ -100,6 +104,12 @@ fun MultiStreamApp(vm: StreamsViewModel) {
                 } else {
                     StreamGrid(vm)
                 }
+                Text(
+                    "v$version",
+                    color = Color(0x88FFFFFF),
+                    fontSize = 9.sp,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(4.dp),
+                )
             }
         }
     }
